@@ -1,0 +1,336 @@
+using AudioReplay.Core.Audio;
+using AudioReplay.Core.Capture;
+using AudioReplay.Core.Config;
+using AudioReplay.Core.Input;
+using AudioReplay.Core.Output;
+using Xunit;
+
+namespace AudioReplay.Tests;
+
+public class HotkeyTests
+{
+    [Theory]
+    [InlineData("Ctrl+Alt+F10")]
+    [InlineData("Shift+A")]
+    [InlineData("F9")]
+    [InlineData("Ctrl+Shift+Win+Num5")]
+    public void RoundTrips(string text)
+    {
+        Assert.True(Hotkey.TryParse(text, out var hotkey));
+        Assert.Equal(text, hotkey.ToString());
+    }
+
+    [Fact]
+    public void ParsesModifiersAndKey()
+    {
+        Assert.True(Hotkey.TryParse("control+alt+f10", out var h));
+        Assert.Equal(HotkeyModifiers.Control | HotkeyModifiers.Alt, h.Modifiers);
+        Assert.Equal(0x79u, h.VirtualKey);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("Ctrl+")]
+    [InlineData("Ctrl+Banana")]
+    [InlineData("Foo+F1")]
+    public void RejectsGarbage(string text) => Assert.False(Hotkey.TryParse(text, out _));
+}
+
+public class TrackRingTests
+{
+    private static readonly TrackInfo Track = new("test", 1);
+
+    private static short[] Tone(int frames, short value)
+    {
+        var s = new short[frames * 2];
+        Array.Fill(s, value);
+        return s;
+    }
+
+    [Fact]
+    public void SilenceAllocatesNothing()
+    {
+        var ring = new TrackRing(Track, 100);
+        ring.Write(1000, new short[AudioFormat.ChunkFrames * 2 * 3]);
+
+        Assert.All(ring.SnapshotRange(0, 20), c => Assert.Null(c));
+    }
+
+    [Fact]
+    public void OneBitDitherCountsAsSilence()
+    {
+        var ring = new TrackRing(Track, 100);
+        ring.Write(0, Tone(1000, 2));
+        ring.Write(0, Tone(1000, -2));
+        Assert.Null(ring.SnapshotRange(0, 0)[0]);
+
+        ring.Write(0, Tone(10, 3)); // just above the noise floor is kept
+        Assert.NotNull(ring.SnapshotRange(0, 0)[0]);
+    }
+
+    [Fact]
+    public void WriteAcrossChunkBoundaryIsSplitCorrectly()
+    {
+        var ring = new TrackRing(Track, 100);
+        var start = AudioFormat.ChunkFrames - 10;
+        ring.Write(start, Tone(30, 5));
+
+        var chunks = ring.SnapshotRange(0, 1);
+        Assert.NotNull(chunks[0]);
+        Assert.NotNull(chunks[1]);
+        Assert.Equal(5, chunks[0]![(AudioFormat.ChunkFrames - 1) * 2]);
+        Assert.Equal(0, chunks[0]![(AudioFormat.ChunkFrames - 11) * 2]);
+        Assert.Equal(5, chunks[1]![19 * 2]);
+        Assert.Equal(0, chunks[1]![20 * 2]);
+    }
+
+    [Fact]
+    public void OverlappingWritesAreSummedWithSaturation()
+    {
+        var ring = new TrackRing(Track, 100);
+        ring.Write(0, Tone(10, 20000));
+        ring.Write(0, Tone(10, 20000));
+
+        Assert.Equal(short.MaxValue, ring.SnapshotRange(0, 0)[0]![0]);
+    }
+
+    [Fact]
+    public void OldChunksFallOutOfTheWindow()
+    {
+        var ring = new TrackRing(Track, 10);
+        ring.Write(0, Tone(100, 7));
+        ring.Write(10L * AudioFormat.ChunkFrames, Tone(100, 9)); // same slot, newer chunk
+
+        Assert.Null(ring.SnapshotRange(0, 0)[0]);
+        Assert.Equal(9, ring.SnapshotRange(10, 10)[0]![0]);
+    }
+
+    [Fact]
+    public void TrimReleasesStaleChunks()
+    {
+        var ring = new TrackRing(Track, 10);
+        ring.Write(0, Tone(100, 7));
+        ring.Trim(1000);
+
+        Assert.False(ring.TryCopyChunk(0, new short[AudioFormat.ChunkSamples]));
+    }
+
+    [Fact]
+    public void ResizeKeepsRecentData()
+    {
+        var ring = new TrackRing(Track, 10);
+        ring.Write(5L * AudioFormat.ChunkFrames, Tone(100, 3));
+        ring.Resize(50);
+
+        Assert.Equal(3, ring.SnapshotRange(5, 5)[0]![0]);
+    }
+}
+
+public class WavFileWriterTests
+{
+    [Fact]
+    public void ProducesValidHeaderAndPadsGaps()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"ar-test-{Guid.NewGuid():N}.wav");
+        try
+        {
+            using (var w = new WavFileWriter(path))
+            {
+                w.WriteAtFrame(100, [1, 1, 2, 2]);
+                w.Complete(1000);
+            }
+
+            var bytes = File.ReadAllBytes(path);
+            Assert.Equal(44 + 1000 * 4, bytes.Length);
+            Assert.Equal("RIFF", System.Text.Encoding.ASCII.GetString(bytes, 0, 4));
+            Assert.Equal("WAVE", System.Text.Encoding.ASCII.GetString(bytes, 8, 4));
+            Assert.Equal(1000u * 4, BitConverter.ToUInt32(bytes, 40));
+            Assert.Equal(48000u, BitConverter.ToUInt32(bytes, 24));
+            Assert.Equal((short)1, BitConverter.ToInt16(bytes, 44 + 100 * 4));
+            Assert.Equal((short)2, BitConverter.ToInt16(bytes, 44 + 101 * 4));
+            Assert.Equal((short)0, BitConverter.ToInt16(bytes, 44 + 99 * 4)); // gap is silence
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+}
+
+public class CapturePlannerTests
+{
+    private static ProcInfo P(uint pid, uint parent, string exe) => new(pid, parent, exe);
+
+    private static Dictionary<uint, ProcInfo> Procs(params ProcInfo[] p) => p.ToDictionary(x => x.Pid);
+
+    [Fact]
+    public void GroupsByExecutableAndSkipsInactive()
+    {
+        var procs = Procs(P(10, 1, "Game.exe"), P(20, 1, "chrome.exe"), P(30, 1, "idle.exe"));
+        var plan = CapturePlanner.Plan(
+            [new(10, true), new(20, true), new(30, false)], procs, _ => false, selfPid: 999);
+
+        Assert.Equal(["chrome", "game"], plan.Targets.Select(t => t.TrackId).Order().ToArray());
+    }
+
+    [Fact]
+    public void ChildOfSameExeIsCoveredByParent()
+    {
+        var procs = Procs(P(1, 0, "explorer.exe"), P(10, 1, "chrome.exe"), P(11, 10, "crashpad.exe"), P(12, 11, "chrome.exe"));
+        var plan = CapturePlanner.Plan([new(10, true), new(12, true)], procs, _ => false, 999);
+
+        var target = Assert.Single(plan.Targets);
+        Assert.Equal(10u, target.Pid);
+        Assert.Contains(12u, plan.Skipped);
+    }
+
+    [Fact]
+    public void ExcludedAndSelfAreNeverCaptured()
+    {
+        var procs = Procs(P(10, 1, "Secret.exe"), P(20, 1, "AudioReplay.exe"));
+        var plan = CapturePlanner.Plan([new(10, true), new(20, true)], procs, id => id == "secret", selfPid: 20);
+
+        Assert.Empty(plan.Targets);
+        Assert.Contains(10u, plan.Skipped);
+    }
+
+    [Fact]
+    public void ParentCycleDoesNotHang()
+    {
+        var procs = Procs(P(10, 11, "a.exe"), P(11, 10, "b.exe"));
+        var plan = CapturePlanner.Plan([new(10, true)], procs, _ => false, 999);
+
+        Assert.Single(plan.Targets);
+    }
+}
+
+public class TrackRegistryTests
+{
+    [Fact]
+    public void SlotsArePermanentAcrossRestarts()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"ar-tracks-{Guid.NewGuid():N}.json");
+        try
+        {
+            var first = new TrackRegistry(path);
+            var chrome = first.Get("chrome");
+            var game = first.Get("game");
+
+            var second = new TrackRegistry(path);
+            Assert.Equal(chrome.Slot, second.Get("chrome").Slot);
+            Assert.Equal(game.Slot, second.Get("game").Slot);
+            Assert.Equal(1, second.Get(TrackRegistry.MicrophoneId).Slot);
+            Assert.NotEqual(chrome.Slot, game.Slot);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+}
+
+public class SettingsTests
+{
+    [Fact]
+    public void NormalizeClampsAndCleans()
+    {
+        var s = new AppSettings
+        {
+            ReplaySeconds = 99999,
+            ReplayHotkey = "nonsense",
+            ExcludedApps = [" Game.EXE ", "game", "", "Other.exe"],
+        };
+        s.Normalize();
+
+        Assert.Equal(AppSettings.MaxReplaySeconds, s.ReplaySeconds);
+        Assert.Equal("Alt+Q", s.ReplayHotkey);
+        Assert.Equal(["game", "other"], s.ExcludedApps);
+    }
+}
+
+public class OutputTests
+{
+    private static string TempDir() => Path.Combine(Path.GetTempPath(), "ar-test-" + Guid.NewGuid().ToString("N"));
+
+    private static void WriteTone(TrackStore store, TrackInfo track, long startFrame, int frames, short value)
+    {
+        var samples = new short[frames * 2];
+        Array.Fill(samples, value);
+        store.Write(track, startFrame, samples);
+    }
+
+    [Fact]
+    public async Task ReplayWritesAlignedFilesPerTrackWithStableNames()
+    {
+        var dir = TempDir();
+        try
+        {
+            var store = new TrackStore(TimeSpan.FromSeconds(30));
+            var a = new TrackInfo("alpha", 2);
+            var b = new TrackInfo("beta", 5);
+            var now = FrameClock.NowFrame;
+            WriteTone(store, a, now - 4 * AudioFormat.SampleRate, 4 * AudioFormat.SampleRate, 1000);
+            WriteTone(store, b, now - AudioFormat.SampleRate, AudioFormat.SampleRate / 2, 2000);
+
+            var result = await new ReplaySaver(store).SaveAsync(3, dir, writeMix: true);
+
+            Assert.True(result.Success, result.Message);
+            Assert.Equal(2, result.TrackCount);
+            var files = Directory.GetFiles(result.Folder!).Select(Path.GetFileName).Order().ToArray();
+            Assert.Equal(new[] { "02_alpha.wav", "05_beta.wav", "mix.wav" }, files.Select(f => f!).ToArray());
+
+            var lengths = Directory.GetFiles(result.Folder!).Select(f => new FileInfo(f).Length).Distinct().ToArray();
+            Assert.Single(lengths); // every track and the mix have identical length
+            Assert.InRange(lengths[0], 44 + 3 * 192_000 - 4, 44 + 3 * 192_000 + 4 * 9600);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task ReplayReportsEmptyBuffer()
+    {
+        var dir = TempDir();
+        var result = await new ReplaySaver(new TrackStore(TimeSpan.FromSeconds(10))).SaveAsync(5, dir, true);
+
+        Assert.False(result.Success);
+        Assert.False(Directory.Exists(dir));
+    }
+
+    [Fact]
+    public void ContinuousRecorderWritesLiveAudioToDisk()
+    {
+        var dir = TempDir();
+        try
+        {
+            var store = new TrackStore(TimeSpan.FromSeconds(15));
+            var track = new TrackInfo("live", 3);
+            var recorder = new ContinuousRecorder(store, () => new RecorderOptions(dir, WriteMix: true, MaxPartMinutes: 60));
+
+            recorder.Start();
+            for (var i = 0; i < 15; i++)
+            {
+                WriteTone(store, track, FrameClock.NowFrame, AudioFormat.SampleRate / 10, 4000);
+                Thread.Sleep(100);
+            }
+
+            var result = recorder.Stop();
+
+            Assert.True(result.Success, result.Message);
+            var wav = Path.Combine(result.Folder!, "03_live.wav");
+            Assert.True(File.Exists(wav));
+            Assert.True(File.Exists(Path.Combine(result.Folder!, "mix.wav")));
+
+            var bytes = File.ReadAllBytes(wav);
+            var seconds = (bytes.Length - 44) / 192_000.0;
+            Assert.InRange(seconds, 1.2, 3.0);
+            Assert.Contains(bytes.Skip(44).Chunk(2).Select(c => BitConverter.ToInt16(c)), v => v == 4000);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+}

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>AudioReplay</AssemblyName>
+    <RootNamespace>AudioReplay.App</RootNamespace>
+    <ApplicationIcon>..\..\assets\AudioReplay.ico</ApplicationIcon>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
+    <ApplicationDefaultFont>Segoe UI, 9pt</ApplicationDefaultFont>
+    <!-- Application.SetColorMode (dark mode follow-system) is experimental in .NET 9. -->
+    <NoWarn>$(NoWarn);WFO5001</NoWarn>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Product>AudioReplay</Product>
+    <AssemblyTitle>AudioReplay</AssemblyTitle>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AudioReplay.Core\AudioReplay.Core.csproj" />
+    <EmbeddedResource Include="..\..\assets\AudioReplay.ico" LogicalName="AudioReplay.ico" />
+  </ItemGroup>
+
+</Project>
