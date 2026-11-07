@@ -248,6 +248,51 @@ public class SettingsTests
     }
 }
 
+public class StreamerModeTests
+{
+    [Fact]
+    public void DefaultsAreOnWithThirtySecondReplay()
+    {
+        var s = new AppSettings();
+
+        Assert.True(s.StreamerMode);
+        Assert.True(s.PlaySound);
+        Assert.True(s.ShowNotifications);
+        Assert.Equal(30, s.ReplaySeconds);
+        Assert.Contains("obs64", s.StreamerApps);
+    }
+
+    [Fact]
+    public void ObsProcessIsDetectedCaseInsensitively()
+    {
+        var running = new[] { new ProcInfo(1, 0, "explorer.exe"), new ProcInfo(2, 1, "OBS64.EXE") };
+
+        Assert.True(StreamingAppDetector.IsAnyRunning(running, new HashSet<string> { "obs64" }));
+        Assert.False(StreamingAppDetector.IsAnyRunning(running, new HashSet<string> { "streamlabs desktop" }));
+    }
+
+    [Fact]
+    public void EmptyStreamerAppListFallsBackToDefaults()
+    {
+        var s = new AppSettings { StreamerApps = ["", "  "] };
+        s.Normalize();
+
+        Assert.Equal(StreamingAppDetector.DefaultApps, s.StreamerApps);
+    }
+
+    [Fact]
+    public void ToneWavIsAValidShortFile()
+    {
+        var wav = ToneWav.Create((880, 100), (1175, 100));
+
+        Assert.Equal("RIFF", System.Text.Encoding.ASCII.GetString(wav, 0, 4));
+        var dataBytes = BitConverter.ToUInt32(wav, 40);
+        Assert.Equal(wav.Length - 44, (int)dataBytes);
+        Assert.Equal(2 * 100 * 44100 / 1000 * 2, (int)dataBytes);
+        Assert.Contains(wav.Skip(44).Chunk(2).Select(c => BitConverter.ToInt16(c)), v => Math.Abs((int)v) > 1000);
+    }
+}
+
 public class OutputTests
 {
     private static string TempDir() => Path.Combine(Path.GetTempPath(), "ar-test-" + Guid.NewGuid().ToString("N"));

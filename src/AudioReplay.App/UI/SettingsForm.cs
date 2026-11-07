@@ -18,6 +18,8 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _mix = new() { Text = "Дополнительно сохранять общий микс (mix.wav)", AutoSize = true };
     private readonly CheckBox _tray = new() { Text = "Показывать значок в трее", AutoSize = true };
     private readonly CheckBox _notify = new() { Text = "Показывать уведомления о сохранении", AutoSize = true };
+    private readonly CheckBox _sound = new() { Text = "Короткий звук при сохранении и записи", AutoSize = true };
+    private readonly CheckBox _streamer = new() { Text = "Режим стримера: без уведомлений, пока запущена OBS (звук остаётся)", AutoSize = true };
     private readonly CheckBox _autostart = new() { Text = "Запускать вместе с Windows", AutoSize = true };
     private readonly TextBox _excluded = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, Height = 60, PlaceholderText = "по одному имени в строке, например: game.exe" };
 
@@ -63,6 +65,8 @@ internal sealed class SettingsForm : Form
         _mix.Checked = s.WriteMixTrack;
         _tray.Checked = s.ShowTrayIcon;
         _notify.Checked = s.ShowNotifications;
+        _sound.Checked = s.PlaySound;
+        _streamer.Checked = s.StreamerMode;
         _autostart.Checked = s.StartWithWindows;
         _excluded.Text = string.Join(Environment.NewLine, s.ExcludedApps);
 
@@ -120,6 +124,8 @@ internal sealed class SettingsForm : Form
         Wide(_mix);
         Wide(_tray);
         Wide(_notify);
+        Wide(_sound);
+        Wide(_streamer);
         Wide(_autostart);
         Row("Не записывать приложения", _excluded);
 
@@ -176,6 +182,8 @@ internal sealed class SettingsForm : Form
         s.WriteMixTrack = _mix.Checked;
         s.ShowTrayIcon = _tray.Checked;
         s.ShowNotifications = _notify.Checked;
+        s.PlaySound = _sound.Checked;
+        s.StreamerMode = _streamer.Checked;
         s.StartWithWindows = _autostart.Checked;
         s.ExcludedApps = [.. _excluded.Lines];
         s.Normalize();

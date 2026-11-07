@@ -3,9 +3,9 @@ using AudioReplay.App.Platform;
 using AudioReplay.App.UI;
 using AudioReplay.Core;
 using AudioReplay.Core.Audio;
+using AudioReplay.Core.Capture;
 using AudioReplay.Core.Config;
 using AudioReplay.Core.Diagnostics;
-using AudioReplay.Core.Input;
 using Microsoft.Win32;
 
 namespace AudioReplay.App;
@@ -23,6 +23,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly HotkeyManager _hotkeys;
     private readonly ControlPipe _pipe;
     private readonly AudioHub _hub;
+    private readonly FeedbackSounds _sounds = new();
     private readonly System.Windows.Forms.Timer _hideTrayTimer = new() { Interval = 8000 };
     private readonly Icon _idleIcon = TrayIcons.Create(recording: false);
     private readonly Icon _recordingIcon = TrayIcons.Create(recording: true);
@@ -44,7 +45,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (firstRun) SettingsStore.Save(_settings, AppPaths.SettingsFile);
 
         _hub = new AudioHub(_settings, new TrackRegistry(AppPaths.TracksFile));
-        _hub.Error += message => OnUi(() => Notify(message, force: true));
+        _hub.Error += message => OnUi(() => Feedback(FeedbackKind.Error, message));
         _hub.RecordingChanged += _ => OnUi(RefreshRecordingState);
 
         _hotkeys = new HotkeyManager();
@@ -107,17 +108,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (result.Success)
             {
                 _lastFolder = result.Folder;
-                Notify($"Откат сохранён: {result.Duration.TotalSeconds:0} с, дорожек: {result.TrackCount}");
+                Feedback(FeedbackKind.Saved, $"Откат сохранён: {result.Duration.TotalSeconds:0} с, дорожек: {result.TrackCount}");
             }
             else
             {
-                Notify(result.Message ?? "Не удалось сохранить откат.");
+                Feedback(FeedbackKind.Warning, result.Message ?? "Не удалось сохранить откат.");
             }
         }
         catch (Exception ex)
         {
             Log.Error("save replay failed", ex);
-            Notify($"Ошибка: {ex.Message}", force: true);
+            Feedback(FeedbackKind.Error, $"Ошибка: {ex.Message}");
         }
         finally
         {
@@ -137,11 +138,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 if (result.Success)
                 {
                     _lastFolder = result.Folder;
-                    Notify($"Запись сохранена: {result.Duration:hh\\:mm\\:ss}, дорожек: {result.TrackCount}");
+                    Feedback(FeedbackKind.RecordingStopped, $"Запись сохранена: {result.Duration:hh\\:mm\\:ss}, дорожек: {result.TrackCount}");
                 }
                 else
                 {
-                    Notify(result.Message ?? "Запись остановлена.");
+                    Feedback(FeedbackKind.Warning, result.Message ?? "Запись остановлена.");
                 }
             }
             else
@@ -150,14 +151,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 if (folder is not null)
                 {
                     _lastFolder = folder;
-                    Notify("Запись началась");
+                    Feedback(FeedbackKind.RecordingStarted, "Запись началась");
                 }
             }
         }
         catch (Exception ex)
         {
             Log.Error("toggle recording failed", ex);
-            Notify($"Ошибка: {ex.Message}", force: true);
+            Feedback(FeedbackKind.Error, $"Ошибка: {ex.Message}");
         }
         finally
         {
@@ -209,7 +210,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             Log.Error("cannot save settings", ex);
-            Notify($"Не удалось сохранить настройки: {ex.Message}", force: true);
+            Feedback(FeedbackKind.Error, $"Не удалось сохранить настройки: {ex.Message}");
         }
 
         _settings = settings;
@@ -223,14 +224,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void RegisterHotkeys()
     {
-        var replay = _settings.ReplayBufferEnabled
-            ? _hotkeys.Register(ReplayHotkeyId, _settings.ReplayHotkeyValue, SaveReplay)
-            : true;
-        if (!_settings.ReplayBufferEnabled) _hotkeys.Unregister(ReplayHotkeyId);
+        var replay = true;
+        if (_settings.ReplayBufferEnabled) replay = _hotkeys.Register(ReplayHotkeyId, _settings.ReplayHotkeyValue, SaveReplay);
+        else _hotkeys.Unregister(ReplayHotkeyId);
         var record = _hotkeys.Register(RecordHotkeyId, _settings.RecordHotkeyValue, ToggleRecording);
 
-        if (!replay) Notify($"Хоткей {_settings.ReplayHotkey} занят другим приложением — выберите другой в настройках.", force: true);
-        if (!record) Notify($"Хоткей {_settings.RecordHotkey} занят другим приложением — выберите другой в настройках.", force: true);
+        if (!replay) Feedback(FeedbackKind.Error, $"Хоткей {_settings.ReplayHotkey} занят другим приложением — выберите другой в настройках.");
+        if (!record) Feedback(FeedbackKind.Error, $"Хоткей {_settings.RecordHotkey} занят другим приложением — выберите другой в настройках.");
     }
 
     private void UpdateMenuText()
@@ -252,15 +252,31 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _tray.Text = $"AudioReplay — {status}";
     }
 
-    /// <summary>Shows a balloon/toast. If the tray icon is hidden it appears only for the duration of the notice.</summary>
-    private void Notify(string text, bool force = false)
+    /// <summary>
+    /// The one place that talks to the user. Sound: whenever enabled. Pop-up: never in streamer mode while a
+    /// streaming app runs; otherwise when notifications are on (errors are shown even if they are off).
+    /// </summary>
+    private void Feedback(FeedbackKind kind, string text)
     {
-        if (!force && !_settings.ShowNotifications) return;
+        Log.Info($"feedback [{kind}]: {text}");
 
-        if (!_tray.Visible)
+        if (_settings.PlaySound) _sounds.Play(kind);
+
+        if (_settings.StreamerMode && StreamingAppDetector.IsAnyRunning(_settings.StreamerApps))
         {
-            _tray.Visible = true;
+            Log.Info("pop-up suppressed: streamer mode (streaming app is running)");
+            return;
         }
+
+        if (kind != FeedbackKind.Error && !_settings.ShowNotifications) return;
+
+        ShowBalloon(text);
+    }
+
+    /// <summary>If the tray icon is hidden it appears only for the duration of the notice.</summary>
+    private void ShowBalloon(string text)
+    {
+        if (!_tray.Visible) _tray.Visible = true;
 
         _hideTrayTimer.Stop();
         _hideTrayTimer.Start();
@@ -276,7 +292,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             Log.Warn($"cannot create save directory: {ex.Message}");
-            Notify($"Папка для записей недоступна: {ex.Message}", force: true);
+            Feedback(FeedbackKind.Error, $"Папка для записей недоступна: {ex.Message}");
         }
     }
 
@@ -316,6 +332,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _pipe.Dispose();
         _hotkeys.Dispose();
         _hub.Dispose(); // finishes a running recording so the WAV headers are valid
+        _sounds.Dispose();
         _tray.Dispose();
         Log.Info("AudioReplay exiting");
         ExitThread();

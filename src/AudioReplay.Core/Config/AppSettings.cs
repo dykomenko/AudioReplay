@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using AudioReplay.Core.Capture;
 using AudioReplay.Core.Input;
 
 namespace AudioReplay.Core.Config;
@@ -15,7 +16,7 @@ public sealed class AppSettings
     public bool ReplayBufferEnabled { get; set; } = true;
 
     /// <summary>Length of the rolling buffer and of the clip written by the replay hotkey.</summary>
-    public int ReplaySeconds { get; set; } = 120;
+    public int ReplaySeconds { get; set; } = 30;
 
     public string ReplayHotkey { get; set; } = "Alt+Q";
 
@@ -37,6 +38,18 @@ public sealed class AppSettings
 
     public bool ShowNotifications { get; set; } = true;
 
+    /// <summary>Play a short sound when a clip is saved, a recording starts/stops, or something goes wrong.</summary>
+    public bool PlaySound { get; set; } = true;
+
+    /// <summary>
+    /// Streamer mode: while a streaming app (OBS, ...) is running no pop-up notifications are shown, so they
+    /// never end up on screen capture. The short sound (if enabled) still plays as feedback.
+    /// </summary>
+    public bool StreamerMode { get; set; } = true;
+
+    /// <summary>Executables that switch streamer mode on (names without ".exe"). Editable in settings.json.</summary>
+    public List<string> StreamerApps { get; set; } = [.. StreamingAppDetector.DefaultApps];
+
     public bool StartWithWindows { get; set; }
 
     /// <summary>Applications that are never captured (exe names, with or without ".exe").</summary>
@@ -52,6 +65,7 @@ public sealed class AppSettings
     {
         var copy = (AppSettings)MemberwiseClone();
         copy.ExcludedApps = [.. ExcludedApps];
+        copy.StreamerApps = [.. StreamerApps];
         return copy;
     }
 
@@ -73,5 +87,12 @@ public sealed class AppSettings
             .Where(n => n.Length > 0)
             .Distinct()
             .ToList();
+
+        StreamerApps = (StreamerApps ?? [])
+            .Select(AppNames.Normalize)
+            .Where(n => n.Length > 0)
+            .Distinct()
+            .ToList();
+        if (StreamerApps.Count == 0) StreamerApps = [.. StreamingAppDetector.DefaultApps];
     }
 }
