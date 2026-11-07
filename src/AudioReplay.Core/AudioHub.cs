@@ -81,7 +81,7 @@ public sealed class AudioHub : IDisposable
         lock (_gate) s = _settings;
 
         if (!s.ReplayBufferEnabled) return SaveResult.Fail("Буфер отката выключен в настройках.");
-        return await _saver.SaveAsync(s.ReplaySeconds, s.SaveDirectory, s.WriteMixTrack).ConfigureAwait(false);
+        return await _saver.SaveAsync(s.ReplaySeconds, s.SaveDirectory, s.WriteMixTrack, s.MergeWindowSeconds).ConfigureAwait(false);
     }
 
     public async Task<string?> StartRecordingAsync()

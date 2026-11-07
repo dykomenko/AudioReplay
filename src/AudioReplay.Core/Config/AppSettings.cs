@@ -18,6 +18,12 @@ public sealed class AppSettings
     /// <summary>Length of the rolling buffer and of the clip written by the replay hotkey.</summary>
     public int ReplaySeconds { get; set; } = 30;
 
+    /// <summary>
+    /// Pressing the replay hotkey again within this many seconds of the previous save appends the audio recorded
+    /// since then to the previous clip instead of creating a new one (capped by <see cref="ReplaySeconds"/>; 0 = off).
+    /// </summary>
+    public int MergeWindowSeconds { get; set; } = 30;
+
     public string ReplayHotkey { get; set; } = "Alt+Q";
 
     public string RecordHotkey { get; set; } = "Ctrl+Alt+Shift+Q";
@@ -76,6 +82,7 @@ public sealed class AppSettings
 
         if (string.IsNullOrWhiteSpace(SaveDirectory)) SaveDirectory = defaults.SaveDirectory;
         ReplaySeconds = Math.Clamp(ReplaySeconds, MinReplaySeconds, MaxReplaySeconds);
+        MergeWindowSeconds = Math.Clamp(MergeWindowSeconds, 0, MaxReplaySeconds);
         MaxRecordingMinutes = Math.Clamp(MaxRecordingMinutes, 5, 240);
 
         if (!Hotkey.TryParse(ReplayHotkey, out _)) ReplayHotkey = defaults.ReplayHotkey;

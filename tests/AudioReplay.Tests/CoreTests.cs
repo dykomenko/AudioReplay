@@ -259,6 +259,7 @@ public class StreamerModeTests
         Assert.True(s.PlaySound);
         Assert.True(s.ShowNotifications);
         Assert.Equal(30, s.ReplaySeconds);
+        Assert.Equal(30, s.MergeWindowSeconds);
         Assert.Contains("obs64", s.StreamerApps);
     }
 
@@ -327,6 +328,172 @@ public class OutputTests
             var lengths = Directory.GetFiles(result.Folder!).Select(f => new FileInfo(f).Length).Distinct().ToArray();
             Assert.Single(lengths); // every track and the mix have identical length
             Assert.InRange(lengths[0], 44 + 3 * 192_000 - 4, 44 + 3 * 192_000 + 4 * 9600);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    private static short[] ReadSamples(string wav) =>
+        File.ReadAllBytes(wav).Skip(44).Chunk(2).Select(c => BitConverter.ToInt16(c)).ToArray();
+
+    [Fact]
+    public void WavAppendKeepsOldAudioAndExtends()
+    {
+        var dir = TempDir();
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "a.wav");
+        try
+        {
+            using (var w = new WavFileWriter(path))
+            {
+                w.WriteAtFrame(0, [7, 7, 7, 7]);
+                w.Complete(100);
+            }
+
+            using (var w = WavFileWriter.OpenForAppend(path))
+            {
+                Assert.Equal(100, w.FramesWritten);
+                w.WriteAtFrame(150, [9, 9]);
+                w.Complete(200);
+            }
+
+            var bytes = File.ReadAllBytes(path);
+            Assert.Equal(44 + 200 * 4, bytes.Length);
+            Assert.Equal(200u * 4, BitConverter.ToUInt32(bytes, 40));
+            Assert.Equal((short)7, BitConverter.ToInt16(bytes, 44));
+            Assert.Equal((short)0, BitConverter.ToInt16(bytes, 44 + 120 * 4)); // gap between old end and new data
+            Assert.Equal((short)9, BitConverter.ToInt16(bytes, 44 + 150 * 4));
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SecondSaveWithinWindowIsAppendedToTheSameClip()
+    {
+        var dir = TempDir();
+        try
+        {
+            var store = new TrackStore(TimeSpan.FromSeconds(30));
+            var saver = new ReplaySaver(store);
+            var alpha = new TrackInfo("alpha", 2);
+            var beta = new TrackInfo("beta", 5);
+            var now = FrameClock.NowFrame;
+            WriteTone(store, alpha, now - 3 * AudioFormat.SampleRate, 3 * AudioFormat.SampleRate, 1000);
+
+            var first = await saver.SaveAsync(2, dir, writeMix: true, mergeWindowSeconds: 10);
+            Assert.True(first.Success, first.Message);
+            Assert.False(first.Appended);
+
+            await Task.Delay(1000);
+            var t = FrameClock.NowFrame;
+            WriteTone(store, alpha, t - AudioFormat.SampleRate, AudioFormat.SampleRate, 1500);
+            WriteTone(store, beta, t - AudioFormat.SampleRate / 2, AudioFormat.SampleRate / 2, 2500); // a new app appears
+
+            var second = await saver.SaveAsync(2, dir, writeMix: true, mergeWindowSeconds: 10);
+
+            Assert.True(second.Success, second.Message);
+            Assert.True(second.Appended);
+            Assert.Equal(first.Folder, second.Folder);
+            Assert.Single(Directory.GetDirectories(dir));
+            Assert.Equal(["02_alpha.wav", "05_beta.wav", "mix.wav"], Directory.GetFiles(second.Folder!).Select(f => Path.GetFileName(f)!).Order().ToArray());
+            Assert.InRange(second.Added.TotalSeconds, 1.0, 1.6);
+            Assert.InRange(second.Duration.TotalSeconds, 3.0, 3.6);
+
+            // Every file has the same length, the old audio is intact, the new audio sits after it.
+            Assert.Single(Directory.GetFiles(second.Folder!).Select(f => new FileInfo(f).Length).Distinct());
+            var a = ReadSamples(Path.Combine(second.Folder!, "02_alpha.wav"));
+            Assert.Equal(1000, a[0]);
+            Assert.Equal(1000, a[(int)(1.5 * AudioFormat.SampleRate) * 2]);  // inside the first save, 0.5 s before its end
+            Assert.Contains(a.Skip(2 * AudioFormat.SampleRate * 2), v => v == 1500);
+            var b = ReadSamples(Path.Combine(second.Folder!, "05_beta.wav"));
+            Assert.All(b.Take(2 * AudioFormat.SampleRate * 2), v => Assert.Equal(0, v)); // beta was silent during the first part
+            Assert.Contains(b, v => v == 2500);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task MergeOffOrExpiredWindowCreatesANewClip()
+    {
+        var dir = TempDir();
+        try
+        {
+            var store = new TrackStore(TimeSpan.FromSeconds(30));
+            var saver = new ReplaySaver(store);
+            var track = new TrackInfo("alpha", 2);
+            WriteTone(store, track, FrameClock.NowFrame - 3 * AudioFormat.SampleRate, 3 * AudioFormat.SampleRate, 1000);
+
+            await saver.SaveAsync(2, dir, true, mergeWindowSeconds: 0);
+            WriteTone(store, track, FrameClock.NowFrame - AudioFormat.SampleRate, AudioFormat.SampleRate, 1000);
+            var off = await saver.SaveAsync(2, dir, true, mergeWindowSeconds: 0);
+            Assert.False(off.Appended);
+            Assert.Equal(2, Directory.GetDirectories(dir).Length);
+
+            await Task.Delay(1300);
+            WriteTone(store, track, FrameClock.NowFrame - AudioFormat.SampleRate, AudioFormat.SampleRate, 1000);
+            var expired = await saver.SaveAsync(2, dir, true, mergeWindowSeconds: 1); // 1 s window, > 1.3 s passed
+            Assert.False(expired.Appended);
+            Assert.Equal(3, Directory.GetDirectories(dir).Length);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task LockedPreviousClipFallsBackToASeparateClip()
+    {
+        var dir = TempDir();
+        try
+        {
+            var store = new TrackStore(TimeSpan.FromSeconds(30));
+            var saver = new ReplaySaver(store);
+            var track = new TrackInfo("alpha", 2);
+            WriteTone(store, track, FrameClock.NowFrame - 3 * AudioFormat.SampleRate, 3 * AudioFormat.SampleRate, 1000);
+            var first = await saver.SaveAsync(2, dir, true, mergeWindowSeconds: 10);
+
+            // An editor holding the file open without sharing makes extending impossible.
+            using var held = new FileStream(Path.Combine(first.Folder!, "02_alpha.wav"), FileMode.Open, FileAccess.Read, FileShare.None);
+            WriteTone(store, track, FrameClock.NowFrame - AudioFormat.SampleRate, AudioFormat.SampleRate, 1000);
+            var second = await saver.SaveAsync(2, dir, true, mergeWindowSeconds: 10);
+
+            Assert.True(second.Success, second.Message);
+            Assert.False(second.Appended);
+            Assert.NotEqual(first.Folder, second.Folder);
+            Assert.NotNull(second.Message);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task NoNewSoundLeavesThePreviousClipUntouched()
+    {
+        var dir = TempDir();
+        try
+        {
+            var store = new TrackStore(TimeSpan.FromSeconds(30));
+            var saver = new ReplaySaver(store);
+            WriteTone(store, new TrackInfo("alpha", 2), FrameClock.NowFrame - 3 * AudioFormat.SampleRate, 3 * AudioFormat.SampleRate, 1000);
+            var first = await saver.SaveAsync(2, dir, true, mergeWindowSeconds: 10);
+            var before = new FileInfo(Path.Combine(first.Folder!, "02_alpha.wav")).Length;
+
+            var second = await saver.SaveAsync(2, dir, true, mergeWindowSeconds: 10);
+
+            Assert.False(second.Success);
+            Assert.Single(Directory.GetDirectories(dir));
+            Assert.Equal(before, new FileInfo(Path.Combine(first.Folder!, "02_alpha.wav")).Length);
         }
         finally
         {

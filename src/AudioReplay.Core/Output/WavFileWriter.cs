@@ -25,7 +25,46 @@ public sealed class WavFileWriter : IDisposable
         WriteHeader(0);
     }
 
+    private WavFileWriter(FileStream stream, long existingFrames)
+    {
+        _stream = stream;
+        _framesEnd = existingFrames;
+    }
+
     public string Path => _stream.Name;
+
+    /// <summary>Number of frames the file holds so far (including what was there before an append).</summary>
+    public long FramesWritten => _framesEnd;
+
+    /// <summary>
+    /// Opens a WAV previously produced by this class so more audio can be written after its end.
+    /// Throws (IOException, InvalidDataException, ...) without side effects if it cannot be extended,
+    /// e.g. the file is held open by an editor.
+    /// </summary>
+    public static WavFileWriter OpenForAppend(string path)
+    {
+        var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, 1 << 16);
+        try
+        {
+            Span<byte> h = stackalloc byte[HeaderSize];
+            var valid = stream.Read(h) == HeaderSize
+                && h[..4].SequenceEqual("RIFF"u8)
+                && h[8..12].SequenceEqual("WAVE"u8)
+                && h[36..40].SequenceEqual("data"u8)
+                && BinaryPrimitives.ReadUInt16LittleEndian(h[22..]) == AudioFormat.Channels
+                && BinaryPrimitives.ReadUInt32LittleEndian(h[24..]) == AudioFormat.SampleRate
+                && BinaryPrimitives.ReadUInt16LittleEndian(h[34..]) == AudioFormat.BitsPerSample;
+            if (!valid) throw new InvalidDataException($"'{path}' is not a 48 kHz/16-bit/stereo WAV written by AudioReplay.");
+
+            var dataBytes = Math.Min(BinaryPrimitives.ReadUInt32LittleEndian(h[40..]), stream.Length - HeaderSize);
+            return new WavFileWriter(stream, dataBytes / AudioFormat.BytesPerFrame);
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
+    }
 
     public void WriteAtFrame(long frameIndex, ReadOnlySpan<short> samples)
     {

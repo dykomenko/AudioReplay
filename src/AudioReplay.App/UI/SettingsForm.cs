@@ -10,6 +10,8 @@ internal sealed class SettingsForm : Form
     private readonly TextBox _folder = new();
     private readonly NumericUpDown _seconds = new() { Minimum = AppSettings.MinReplaySeconds, Maximum = AppSettings.MaxReplaySeconds };
     private readonly Label _memoryHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
+    private readonly NumericUpDown _merge = new() { Minimum = 0, Maximum = AppSettings.MaxReplaySeconds };
+    private readonly Label _mergeHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText, MaximumSize = new Size(440, 0), Text = "Нажали хоткей снова в течение этого времени: звук после прошлого сохранения допишется в тот же клип. 0 — не склеивать." };
     private readonly CheckBox _bufferOn = new() { Text = "Держать буфер отката в памяти", AutoSize = true };
     private readonly HotkeyBox _replayKey = new();
     private readonly HotkeyBox _recordKey = new();
@@ -45,9 +47,9 @@ internal sealed class SettingsForm : Form
 
         _seconds.ValueChanged += (_, _) => UpdateHint();
         _micOn.CheckedChanged += (_, _) => _micDevice.Enabled = _micOn.Checked;
-        _bufferOn.CheckedChanged += (_, _) => { _seconds.Enabled = _bufferOn.Checked; _replayKey.Enabled = _bufferOn.Checked; };
+        _bufferOn.CheckedChanged += (_, _) => { _seconds.Enabled = _merge.Enabled = _replayKey.Enabled = _bufferOn.Checked; };
         _micDevice.Enabled = _micOn.Checked;
-        _seconds.Enabled = _replayKey.Enabled = _bufferOn.Checked;
+        _seconds.Enabled = _merge.Enabled = _replayKey.Enabled = _bufferOn.Checked;
         UpdateHint();
     }
 
@@ -58,6 +60,7 @@ internal sealed class SettingsForm : Form
     {
         _folder.Text = s.SaveDirectory;
         _seconds.Value = Math.Clamp(s.ReplaySeconds, AppSettings.MinReplaySeconds, AppSettings.MaxReplaySeconds);
+        _merge.Value = Math.Clamp(s.MergeWindowSeconds, 0, AppSettings.MaxReplaySeconds);
         _bufferOn.Checked = s.ReplayBufferEnabled;
         _replayKey.Value = s.ReplayHotkeyValue;
         _recordKey.Value = s.RecordHotkeyValue;
@@ -117,6 +120,8 @@ internal sealed class SettingsForm : Form
         Wide(_bufferOn);
         Row("Длина отката, сек", _seconds);
         Wide(_memoryHint);
+        Row("Склейка повторных нажатий, сек", _merge);
+        Wide(_mergeHint);
         Row("Хоткей: сохранить откат", _replayKey);
         Row("Хоткей: запись вкл/выкл", _recordKey);
         Wide(_micOn);
@@ -175,6 +180,7 @@ internal sealed class SettingsForm : Form
         s.SaveDirectory = _folder.Text.Trim();
         s.ReplayBufferEnabled = _bufferOn.Checked;
         s.ReplaySeconds = (int)_seconds.Value;
+        s.MergeWindowSeconds = (int)_merge.Value;
         s.ReplayHotkey = _replayKey.Value.ToString();
         s.RecordHotkey = _recordKey.Value.ToString();
         s.CaptureMicrophone = _micOn.Checked;

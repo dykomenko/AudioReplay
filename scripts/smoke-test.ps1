@@ -38,6 +38,23 @@ try {
     if ($vol -match 'max_volume: -inf') { throw 'FAIL: pwsh track is silent' }
 
     Write-Host "OK: $($clip.Name) -> $((Get-ChildItem $clip.FullName).Name -join ', ')"
+
+    # Second press shortly after the first must extend the same clip (merge window), not create a new one.
+    $lengthBefore = $track.Length
+    $player = Start-Process pwsh -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', "(New-Object Media.SoundPlayer '$Sound').PlaySync()"
+    $player.WaitForExit()
+    Start-Sleep 1
+    & $exe --save
+    Start-Sleep 3
+
+    if (@(Get-ChildItem $out -Directory).Count -ne 1) { throw 'FAIL: second save created a new clip instead of extending the first' }
+    $track = Get-ChildItem $clip.FullName -Filter '*_pwsh.wav'
+    if ($track.Length -le $lengthBefore) { throw 'FAIL: clip did not grow after the second save' }
+    $sizes = Get-ChildItem $clip.FullName -Filter *.wav | Select-Object -ExpandProperty Length -Unique
+    if (@($sizes).Count -ne 1) { throw 'FAIL: tracks have different lengths after merge' }
+    $bursts = @(ffmpeg -hide_banner -i $track.FullName -af 'silencedetect=n=-50dB:d=0.5' -f null - 2>&1 | Select-String 'silence_end').Count
+    if ($bursts -lt 2) { throw "FAIL: expected two separate sounds in the merged pwsh track, found $bursts" }
+    Write-Host ("OK: merged into one clip, {0:N1} s -> {1:N1} s, sounds found: {2}" -f (($lengthBefore - 44) / 192000), (($track.Length - 44) / 192000), $bursts)
 }
 finally {
     & $exe --exit

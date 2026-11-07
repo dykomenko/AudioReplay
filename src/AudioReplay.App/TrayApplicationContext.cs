@@ -108,7 +108,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (result.Success)
             {
                 _lastFolder = result.Folder;
-                Feedback(FeedbackKind.Saved, $"Откат сохранён: {result.Duration.TotalSeconds:0} с, дорожек: {result.TrackCount}");
+                var text = result.Appended
+                    ? $"Добавлено к прошлому клипу: +{result.Added.TotalSeconds:0} с, всего {result.Duration.TotalSeconds:0} с, дорожек: {result.TrackCount}"
+                    : $"Откат сохранён: {result.Duration.TotalSeconds:0} с, дорожек: {result.TrackCount}";
+                if (result.Message is not null) text += $"\n{result.Message}";
+                Feedback(FeedbackKind.Saved, text);
             }
             else
             {
